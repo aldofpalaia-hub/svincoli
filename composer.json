@@ -1,0 +1,11 @@
+{
+    "require": {
+        "phpoffice/phpspreadsheet": "1.29",
+        "guzzlehttp/guzzle": "7.9",
+        "ext-dom": "*",
+        "ext-iconv": "*",
+        "ext-mbstring": "*",
+        "ext-simplexml": "*",
+        "ext-xmlwriter": "*"
+    }
+}

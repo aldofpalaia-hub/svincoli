@@ -1,0 +1,18 @@
+{
+  "name": "svincoli",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "basic-ftp": "^5.0.5",
+    "dotenv": "^17.2.1",
+    "playwright": "^1.55.0",
+    "ssh2-sftp-client": "^12.0.1"
+  },
+  "description": ""
+}

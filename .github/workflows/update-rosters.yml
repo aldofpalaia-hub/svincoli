@@ -1,0 +1,29 @@
+name: Update negher rosters (Playwright → HTTP upload)
+
+on:
+  schedule:
+    - cron: '10 1 * * *'   # ogni giorno 01:10 UTC ≈ 03:10 CET/CEST
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install deps
+        run: |
+          npm ci || npm i
+          npx playwright install chromium
+
+      - name: Download XLSX and upload to site
+        run: node scripts/download_leghe_rosters_ci.mjs
+        env:
+          LEGHE_EMAIL: ${{ secrets.LEGHE_EMAIL }}
+          LEGHE_PASSWORD: ${{ secrets.LEGHE_PASSWORD }}
+          UPLOAD_URL: ${{ secrets.UPLOAD_URL }}
+          UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
