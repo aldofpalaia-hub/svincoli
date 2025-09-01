@@ -1,25 +1,68 @@
-- name: Install deps
-  run: |
-    npm ci || npm i
-    npx playwright install --with-deps chromium
+name: Update negher rosters (Playwright → HTTP upload)
 
-- name: Download XLSX and upload to site (headless)
-  env:
-    LEGHE_EMAIL: ${{ secrets.LEGHE_EMAIL }}
-    LEGHE_PASSWORD: ${{ secrets.LEGHE_PASSWORD }}
-    UPLOAD_URL: ${{ secrets.UPLOAD_URL }}
-    UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
-    DEBUG: pw:api              # log Playwright ad alto livello
-  run: node scripts/download_leghe_rosters_ci.mjs
+on:
+  workflow_dispatch: {}
+  # facoltativo: schedule notturno
+  # schedule:
+  #   - cron: '10 1 * * *'   # 01:10 UTC (~03:10 IT)
 
-# se lo script salverà screenshot/log, li carichiamo sempre come artifact
-- name: Upload debug artifacts
-  if: always()
-  uses: actions/upload-artifact@v4
-  with:
-    name: debug-artifacts
-    path: |
-      cache/**
-      negher rosters.xlsx
-      debug/**
-    if-no-files-found: ignore
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install deps
+        run: |
+          npm ci || npm i
+          npx playwright install --with-deps chromium
+
+      - name: Rebuild storageState from chunked secrets
+        shell: bash
+        env:
+          P1: ${{ secrets.LEGHE_STORAGE_B64_PART1 }}
+          P2: ${{ secrets.LEGHE_STORAGE_B64_PART2 }}
+          P3: ${{ secrets.LEGHE_STORAGE_B64_PART3 }}
+          P4: ${{ secrets.LEGHE_STORAGE_B64_PART4 }}
+          P5: ${{ secrets.LEGHE_STORAGE_B64_PART5 }}
+        run: |
+          set -e
+          mkdir -p cache
+          printf "%s" "${P1}${P2}${P3}${P4}${P5}${P6}${P7}${P8}" | tr -d '\n\r' > cache/auth-state.b64
+          if [ -s cache/auth-state.b64 ]; then
+            base64 -d cache/auth-state.b64 > cache/auth-state.json.gz || true
+            if [ -s cache/auth-state.json.gz ]; then
+              gunzip -f cache/auth-state.json.gz || true
+            fi
+            if [ -s cache/auth-state.json ]; then
+              echo "storageState ricostruito."
+            else
+              echo "Nessun storage ricostruito (nessun chunk valido) — tenterò login con email/password."
+            fi
+          else
+            echo "Nessun chunk presente — tenterò login con email/password."
+          fi
+
+      - name: Download XLSX and upload to site (headless)
+        env:
+          LEGHE_EMAIL: ${{ secrets.LEGHE_EMAIL }}
+          LEGHE_PASSWORD: ${{ secrets.LEGHE_PASSWORD }}
+          UPLOAD_URL: ${{ secrets.UPLOAD_URL }}
+          UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
+          DEBUG: pw:api
+        run: node scripts/download_leghe_rosters_ci.mjs
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-artifacts
+          path: |
+            cache/**
+            debug/**
+            negher rosters.xlsx
+          if-no-files-found: ignore
