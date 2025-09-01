@@ -8,6 +8,8 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
       - uses: actions/checkout@v4
 
@@ -20,38 +22,10 @@ jobs:
           npm ci || npm i
           npx playwright install --with-deps chromium
 
-      - name: Rebuild storageState from chunked secrets
-        shell: bash
-        env:
-          P1: ${{ secrets.LEGHE_STORAGE_B64_PART1 }}
-          P2: ${{ secrets.LEGHE_STORAGE_B64_PART2 }}
-          P3: ${{ secrets.LEGHE_STORAGE_B64_PART3 }}
-          P4: ${{ secrets.LEGHE_STORAGE_B64_PART4 }}
-          P5: ${{ secrets.LEGHE_STORAGE_B64_PART5 }}
-          P6: ${{ secrets.LEGHE_STORAGE_B64_PART6 }}
-          P7: ${{ secrets.LEGHE_STORAGE_B64_PART7 }}
-          P8: ${{ secrets.LEGHE_STORAGE_B64_PART8 }}
-        run: |
-          set -e
-          mkdir -p cache
-          printf "%s" "${P1}${P2}${P3}${P4}${P5}${P6}${P7}${P8}" | tr -d '\n\r' > cache/auth-state.b64
-          if [ -s cache/auth-state.b64 ]; then
-            base64 -d cache/auth-state.b64 > cache/auth-state.json.gz || true
-            [ -s cache/auth-state.json.gz ] && gunzip -f cache/auth-state.json.gz || true
-            ls -l cache || true
-            if [ -s cache/auth-state.json ]; then
-              echo "storageState ricostruito."
-            else
-              echo "Chunk presenti ma non validi: tenterò login con email/password."
-            fi
-          else
-            echo "Nessun chunk presente: tenterò login con email/password."
-          fi
-
       - name: Download XLSX and upload to site (headless)
         env:
-          LEGHE_EMAIL: ${{ secrets.LEGHE_EMAIL }}        # fallback se i cookie non ricostruiscono
-          LEGHE_PASSWORD: ${{ secrets.LEGHE_PASSWORD }}  # fallback se i cookie non ricostruiscono
+          LEGHE_EMAIL: ${{ secrets.LEGHE_EMAIL }}
+          LEGHE_PASSWORD: ${{ secrets.LEGHE_PASSWORD }}
           UPLOAD_URL: ${{ secrets.UPLOAD_URL }}
           UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
           DEBUG: pw:api
