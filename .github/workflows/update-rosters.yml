@@ -3,16 +3,14 @@ name: Update negher rosters (Playwright → HTTP upload)
 on:
   workflow_dispatch: {}
   # schedule:
-  #   - cron: '10 1 * * *'   # 01:10 UTC (~03:10 Italia)
+  #   - cron: '10 2 * * *'   # 03:10 ora italiana (circa), regolata su UTC
 
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -22,12 +20,19 @@ jobs:
           npm ci || npm i
           npx playwright install --with-deps chromium
 
+      - name: Check required secrets
+        run: |
+          [ -n "${{ secrets.LEGHE_EMAIL }}" ]    || { echo "::error::Missing LEGHE_EMAIL"; exit 1; }
+          [ -n "${{ secrets.LEGHE_PASSWORD }}" ] || { echo "::error::Missing LEGHE_PASSWORD"; exit 1; }
+          [ -n "${{ secrets.UPLOAD_URL }}" ]     || { echo "::error::Missing UPLOAD_URL"; exit 1; }
+          [ -n "${{ secrets.UPLOAD_TOKEN }}" ]   || { echo "::error::Missing UPLOAD_TOKEN"; exit 1; }
+
       - name: Download XLSX and upload to site (headless)
         env:
-          LEGHE_EMAIL: ${{ secrets.LEGHE_EMAIL }}
+          LEGHE_EMAIL:    ${{ secrets.LEGHE_EMAIL }}
           LEGHE_PASSWORD: ${{ secrets.LEGHE_PASSWORD }}
-          UPLOAD_URL: ${{ secrets.UPLOAD_URL }}
-          UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
+          UPLOAD_URL:     ${{ secrets.UPLOAD_URL }}
+          UPLOAD_TOKEN:   ${{ secrets.UPLOAD_TOKEN }}
           DEBUG: pw:api
         run: node scripts/download_leghe_rosters_ci.mjs
 
