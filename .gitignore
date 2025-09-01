@@ -1,14 +1,6 @@
-﻿.env
-cache/
-negher rosters.xlsx
-*.log
 node_modules/
 .env
 cache/
-negher rosters.xlsx
-*.log
-node_modules/
-.env
-cache/
+debug/
 negher rosters.xlsx
 *.log
