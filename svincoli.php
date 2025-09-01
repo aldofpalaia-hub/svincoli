@@ -10,19 +10,22 @@ use GuzzleHttp\Client;
 
 /* ========================== CONFIG ========================== */
 
-const ROSTERS_XLSX = __DIR__ . '/negher rosters.xlsx'; // <— cambia se vuoi
-const PAGE_URL     = 'https://www.fantacalcio.it/quotazioni-fantacalcio'; // Mantra + Stagione 2025/26
+const ROSTERS_XLSX = __DIR__ . '/negher rosters.xlsx';        // file con le rose
+const PAGE_URL     = 'https://www.fantacalcio.it/quotazioni-fantacalcio'; // Mantra 2025/26
 const PRICES_URL   = 'https://www.fantacalcio.it/api/v1/Excel/prices/20/1'; // spesso 401
 const CACHE_DIR    = __DIR__ . '/cache';
 const CACHE_XLSX   = CACHE_DIR . '/prices.xlsx';  // cache da upload Excel
 const CACHE_JSON   = CACHE_DIR . '/prices.json';  // cache da scraping / incolla
-const MAX_UPLOAD_B = 8 * 1024 * 1024; // 8 MB
+const MAX_UPLOAD_B = 8 * 1024 * 1024;            // 8 MB
+const UA_BROWSER   = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari';
+const CAMPIONCINO_PATH_SEASON = '20';            // cartella stagione per campioncini
 
 /* ========================== UTILS =========================== */
 
 function norm(string $s): string {
     $s = trim($s);
-    $s = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $s) ?: $s;
+    $t = @iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $s);
+    if ($t !== false && $t !== '') $s = $t;
     $s = strtolower($s);
     $s = preg_replace('/[^a-z0-9\s]/u', ' ', $s);
     $s = preg_replace('/\s+/', ' ', $s);
@@ -225,6 +228,7 @@ function loadPriceListXlsx(string $file): array {
     $colSq   = $headers['squadra'] ?? $headers['team'] ?? 3;
     $colQA   = $headers['quotazione'] ?? $headers['q attuale'] ?? 4;
     $colQI   = $headers['quotazione iniziale'] ?? $headers['q iniziale'] ?? 5;
+    $colID   = $headers['id'] ?? $headers['id calciatore'] ?? $headers['calciatore id'] ?? null; // opzionale
 
     $map = [];
     $maxR = $sh->getHighestRow();
@@ -235,13 +239,18 @@ function loadPriceListXlsx(string $file): array {
         $sq    = (string)cellVal($sh, $colSq,    $r);
         $qa    = numify(cellCalc($sh, $colQA,    $r));
         $qi    = numify(cellCalc($sh, $colQI,    $r));
+        $id    = $colID ? trim((string)cellVal($sh, $colID, $r)) : '';
         if ($qi<=0) continue;
-        $map[norm($nome)] = ['nome'=>$nome,'ruolo'=>$ruolo,'squadra'=>$sq,'q_att'=>$qa,'q_ini'=>$qi];
+
+        $map[norm($nome)] = [
+            'nome'=>$nome,'ruolo'=>$ruolo,'squadra'=>$sq,'q_att'=>$qa,'q_ini'=>$qi,
+            'id'=>$id !== '' ? $id : null,
+        ];
     }
     return $map;
 }
 
-/* ===================== SCRAPING (Mantra + Ruoli) =============== */
+/* ===================== SCRAPING (Mantra + Ruoli + ID) ========= */
 
 function extractRoleToken(string $s): string {
     $rx = '/(?<![A-Za-zÀ-ÖØ-öø-ÿ])(Por|Dc|Dd|Ds|E|M|C|W|T|A|Pc)(?![A-Za-zÀ-ÖØ-öø-ÿ])/u';
@@ -252,7 +261,7 @@ function scrapePricesFromPage(string $url): array {
     $client = new Client([
         'timeout' => 25,
         'headers' => [
-            'User-Agent'      => 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari',
+            'User-Agent'      => UA_BROWSER,
             'Accept'          => 'text/html,application/xhtml+xml',
             'Accept-Language' => 'it-IT,it;q=0.9,en;q=0.8',
         ],
@@ -261,17 +270,34 @@ function scrapePricesFromPage(string $url): array {
     if ($res->getStatusCode() !== 200) throw new RuntimeException('HTTP '.$res->getStatusCode());
 
     $html = (string)$res->getBody();
-    $html = preg_replace('#<script[^>]*>.*?</script>#is', '', $html);
-    $html = preg_replace('#<style[^>]*>.*?</style>#is', '', $html);
 
-    $txt  = html_entity_decode(strip_tags($html), ENT_QUOTES|ENT_HTML5, 'UTF-8');
-    $txt  = str_replace(["\xC2\xA0", "\xE2\x80\xAF", "\xEF\xBB\xBF"], ' ', $txt); // NBSP ecc.
-    $txt  = preg_replace('/[ \t]+/u', ' ', $txt);
-    $txt  = preg_replace('/\R+/u', "\n", $txt);
+    // 1) Cattura anchor dei profili: .../serie-a/squadre/<team>/<slug>/<ID>
+    $nameToId = [];
+    if (preg_match_all(
+        '#<a[^>]+href="(?:https?:\/\/www\.fantacalcio\.it)?\/serie-a\/squadre\/[^\/]+\/[^\/]+\/(\d+)"[^>]*>(.*?)<\/a>#si',
+        $html, $m, PREG_SET_ORDER
+    )) {
+        foreach ($m as $x) {
+            $id   = trim($x[1]);
+            $name = trim(html_entity_decode(strip_tags($x[2]), ENT_QUOTES|ENT_HTML5, 'UTF-8'));
+            if ($name !== '' && $id !== '') {
+                $nameToId[norm($name)] = $id; // es. "martinez l" => "2764"
+            }
+        }
+    }
 
+    // 2) Pulisci/linearizza il testo per il parser
+    $clean  = preg_replace('#<script[^>]*>.*?</script>#is', '', $html);
+    $clean  = preg_replace('#<style[^>]*>.*?</style>#is',  '', $clean);
+    $txt    = html_entity_decode(strip_tags($clean), ENT_QUOTES|ENT_HTML5, 'UTF-8');
+    $txt    = str_replace(["\xC2\xA0", "\xE2\x80\xAF", "\xEF\xBB\xBF"], ' ', $txt);
+    $txt    = preg_replace('/[ \t]+/u', ' ', $txt);
+    $txt    = preg_replace('/\R+/u', "\n", $txt);
+
+    // 3) Parser righe listino (Mantra)
     $pattern = '/(^|[\n\r])\s*' .
-               '([A-Za-zÀ-ÖØ-öø-ÿ0-9\.\'\- ]{2,})\s+' . // nome (2)
-               '([A-Z]{2,3})\s+' .                      // squadra (3)
+               '([A-Za-zÀ-ÖØ-öø-ÿ0-9\.\'\- ]{2,})\s+' . // nome come in lista (es. "Martinez L.")
+               '([A-Z]{2,3})\s+' .                      // squadra (sigla)
                '(\d{1,3})\s+(\d{1,3})\s+[\d,.]{1,5}\s+' .
                '(\d{1,3})\s+(\d{1,3})\s+[\d,.]{1,5}\s*(?=\n|$)/u';
 
@@ -282,22 +308,25 @@ function scrapePricesFromPage(string $url): array {
     $map = [];
     foreach ($rows as $r) {
         $full  = $r[0];
-        $nome  = trim($r[2]);
+        $nome  = trim($r[2]);            // es. "Martinez L."
         $squad = trim($r[3]);
         $qi2   = (float)$r[6];
         $qa2   = (float)$r[7];
         if ($qi2 <= 0) continue;
 
-        $pos   = mb_stripos($full, $nome);
-        $before= $pos !== false ? mb_substr($full, 0, $pos) : $full;
-        $ruolo = extractRoleToken($before);
+        // ruolo dal testo prima del nome
+        $pos    = mb_stripos($full, $nome);
+        $before = $pos !== false ? mb_substr($full, 0, $pos) : $full;
+        $ruolo  = extractRoleToken($before);
 
-        $map[norm($nome)] = [
+        $k = norm($nome);
+        $map[$k] = [
             'nome'    => $nome,
             'ruolo'   => $ruolo,
             'squadra' => $squad,
             'q_att'   => $qa2,
             'q_ini'   => $qi2,
+            'id'      => $nameToId[$k] ?? null,  // ID se trovato
         ];
     }
     if (!$map) throw new RuntimeException('Parser: nessun dato utile estratto.');
@@ -322,6 +351,7 @@ function parsePastedPricesToMap(string $txt): array {
         'squadra'=> findHeader($headers, ['squadra','sq']),
         'qi'     => findHeader($headers, ['qi','q iniziale','quotazione iniziale']),
         'qa'     => findHeader($headers, ['qa','q attuale','quotazione']),
+        // notare: Incolla raramente ha l'ID; se presente puoi estendere qui
     ];
     if ($idx['nome']===-1 || $idx['qi']===-1 || $idx['qa']===-1) return [];
 
@@ -340,6 +370,57 @@ function parsePastedPricesToMap(string $txt): array {
     return $map;
 }
 
+/* =================== MATCHING NOMI ROBUSTO ==================== */
+
+/**
+ * Cerca una riga prezzi partendo dal nome roster, con fallback:
+ *  - chiave esatta (norm)
+ *  - cognome + iniziale nome (es. "martinez l")
+ *  - ultimi due token ("joao pedro", "mario rui", "luis alberto")
+ *  - particelle (di/de/van/…)
+ *  - se un solo match per cognome*, usa quello
+ */
+function fc_find_price_row(array $priceMap, string $playerName): ?array {
+    $k = norm($playerName);
+    if (isset($priceMap[$k])) return $priceMap[$k];
+
+    $tokens = preg_split('/\s+/', $k);
+    $tokens = array_values(array_filter($tokens, fn($t)=>$t!==''));
+    $n = count($tokens);
+    if ($n === 0) return null;
+
+    $last  = $tokens[$n-1];
+    $first = $tokens[0];
+
+    // 1) cognome + iniziale nome
+    if ($n >= 2) {
+        $cand = $last.' '.substr($first,0,1);
+        if (isset($priceMap[$cand])) return $priceMap[$cand];
+    }
+    // 2) ultimi due token (per doppi nomi)
+    if ($n >= 2) {
+        $cand = $tokens[$n-2].' '.$last;
+        if (isset($priceMap[$cand])) return $priceMap[$cand];
+    }
+    // 3) cognome con particella
+    $particles = ['di','de','del','della','da','dal','d','van','von','la','le','lo','mac','mc','bin','al'];
+    if ($n >= 3 && in_array($tokens[$n-2], $particles, true)) {
+        $cand = $tokens[$n-2].' '.$last;
+        if (isset($priceMap[$cand])) return $priceMap[$cand];
+    }
+    // 4) unico match per cognome*
+    $matches = [];
+    foreach ($priceMap as $key => $row) {
+        if (preg_match('/^'.preg_quote($last, '/').'\s+[a-z]/', $key)) {
+            $matches[] = $key;
+            if (count($matches) > 1) break;
+        }
+    }
+    if (count($matches) === 1) return $priceMap[$matches[0]];
+
+    return null;
+}
+
 /* =================== CALCOLO RIMBORSO SQUADRA ================= */
 
 function computeTeamPayouts(array $teamPlayers, array $priceMap): array {
@@ -349,18 +430,23 @@ function computeTeamPayouts(array $teamPlayers, array $priceMap): array {
         $purchase   = (float)$row['costo'];
         $ruoloRoster= (string)($row['ruolo'] ?? '');
         $key = norm($playerName);
-        $found = $priceMap[$key] ?? null;
+        $found = $priceMap[$key] ?? fc_find_price_row($priceMap, $playerName);
 
         if ($found) {
             $qAtt = (float)$found['q_att'];
             $qIni = (float)$found['q_ini'];
             $raw  = $qIni > 0 ? ($purchase * $qAtt) / $qIni : 0.0;
             $rows[] = [
-                'player'=>$found['nome'],
-                'ruolo'=>$ruoloRoster !== '' ? $ruoloRoster : (string)$found['ruolo'],
-                'squadra'=>$found['squadra'],
-                'acquisto'=>$purchase,'q_att'=>$qAtt,'q_ini'=>$qIni,
-                'calc'=>$raw,'rimborso'=>half_up($raw),'match'=>'OK'
+                'player'   => $found['nome'],
+                'ruolo'    => $ruoloRoster !== '' ? $ruoloRoster : (string)($found['ruolo'] ?? ''),
+                'squadra'  => $found['squadra'],
+                'acquisto' => $purchase,
+                'q_att'    => $qAtt,
+                'q_ini'    => $qIni,
+                'calc'     => $raw,
+                'rimborso' => half_up($raw),
+                'match'    => 'OK',
+                'id'       => $found['id'] ?? null,   // per campioncini
             ];
         } else {
             $rows[] = [
@@ -386,6 +472,23 @@ $results = ($selectedTeam && isset($teams[$selectedTeam])) ? computeTeamPayouts(
 $logoUrl = getLogoDataUrl();
 
 /* ============================ VIEW =========================== */
+/* Campioncino via ID ufficiale (card -> fallback small) */
+
+function fc_guess_camp_id_from_row(array $r): ?string {
+  foreach (['id','Id','camp_id','id_campioncino','IdCalciatore','PlayerId','id_giocatore','Codice','cod'] as $k) {
+    if (!empty($r[$k])) return (string)$r[$k];
+  }
+  return null;
+}
+function campioncino_img_auto(string $player, ?string $id = null, string $class='campioncino'): string {
+  if (!$id) return '';
+  $base  = 'https://content.fantacalcio.it/web/campioncini/'.CAMPIONCINO_PATH_SEASON.'/';
+  $card  = $base.'card/'.$id.'.png?v=342';
+  $small = $base.'small/'.$id.'.png?v=342';
+  $onerr = "this.onerror=null;this.src='".htmlspecialchars($small, ENT_QUOTES)."';";
+  return '<img alt="" class="'.htmlspecialchars($class,ENT_QUOTES).'" src="'.htmlspecialchars($card,ENT_QUOTES).'" onerror="'.$onerr.'">';
+}
+
 ?>
 <!doctype html>
 <html lang="it" data-bs-theme="dark">
@@ -405,6 +508,64 @@ body{background:var(--brand-dark); color:#e8eef2}
 .table>:not(caption)>*>*{border-bottom-color:#243041}
 .btn-primary{--bs-btn-bg:var(--brand-primary);--bs-btn-border-color:var(--brand-primary);--bs-btn-hover-bg:#d8870c;--bs-btn-hover-border-color:#d8870c}
 .sticky-summary{position:sticky; bottom:0; background:#0f1318; border-top:1px solid #1f2630; padding:.75rem 1rem;}
+.player-cell{display:flex;align-items:center;gap:.5rem}
+.campioncino{width:28px;height:28px;object-fit:contain;border-radius:6px}
+.player-open{display:flex;align-items:center;gap:.5rem;text-decoration:none;color:inherit}
+.player-open:hover .player-name{text-decoration:underline}
+/* nascondi colonne superflue su mobile: mostrale da sm in su */
+@media (max-width: 575.98px){
+  .col-mobile-hide{display:none!important}
+}
+/* evita scroll orizzontale su mobile e fai occupare tutta la larghezza */
+.table-responsive.table-center{ overflow-x: visible; }
+
+@media (max-width:575.98px){
+  .table-responsive.table-center{
+    overflow-x: hidden !important;          /* niente “slide” a sinistra/destra */
+    touch-action: pan-y;                     /* consenti solo scroll verticale */
+    -webkit-overflow-scrolling: auto;
+  }
+  .table-center .table{
+    width:100% !important;                   /* riempi tutto, niente spazio a destra */
+    table-layout: fixed;                     /* colonne stabili */
+  }
+  .table-center .table th,
+  .table-center .table td{
+    white-space: nowrap;                     /* evita a capo brutti */
+  }
+  .player-name{ min-width:0; }               /* ellissi corretta sul nome */
+}
+/* Mobile: tabella a tutta larghezza, nessuno scroll orizzontale */
+@media (max-width:575.98px){
+  .table-responsive{ overflow-x:hidden !important; }
+
+  /* la tabella riempie il contenitore */
+  #tbl{
+    width:100% !important;
+    table-layout:auto;              /* più flessibile del fixed coi contenuti variabili */
+    margin:0 !important;
+    border-collapse:separate;
+    border-spacing:0;
+  }
+
+  /* override dei min-width inline dei TH (180px/70px) */
+  #tbl th{ min-width:0 !important; }
+
+  /* la cella nome si adatta e va in ellissi */
+  .player-cell{ min-width:0; }
+  .player-open{ display:flex; align-items:center; gap:.5rem; min-width:0; }
+  .player-name{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+
+  /* dimensiona le colonne visibili: Ruolo e Rimborso */
+  #tbl th:nth-child(3), #tbl td:nth-child(3){ width:74px; }         /* Ruolo */
+  #tbl th:nth-child(9), #tbl td:nth-child(9){ width:86px; text-align:right; } /* Rimborso */
+
+  /* fix Safari/iOS: elimina il micro-gap destro */
+  @supports (-webkit-touch-callout: none){
+    #tbl{ width:calc(100% + 1px) !important; margin-right:-1px !important; }
+  }
+}
+
 </style>
 </head>
 <body>
@@ -466,25 +627,26 @@ body{background:var(--brand-dark); color:#e8eef2}
         <span class="text-secondary small">Sorgente prezzi: <?= file_exists(CACHE_JSON) ? 'Web/Incolla' : (file_exists(CACHE_XLSX) ? 'Excel' : 'Remoto') ?></span>
       </div>
       <div class="card-body p-0">
-        <div class="table-responsive">
-          <table id="tbl" class="table table-dark table-striped table-hover align-middle mb-0">
+        <div class="table-responsive px-0">
+  <table id="tbl" class="table table-dark table-striped table-hover align-middle mb-0 w-100">
             <thead>
-            <tr>
-              <th style="width:44px">
-                <input class="form-check-input" type="checkbox" id="checkAll" title="Seleziona tutti">
-              </th>
-              <th style="min-width:180px">Calciatore</th>
-              <th style="min-width:70px">Ruolo</th>
-              <th>Squadra</th>
-              <th>Acquisto</th>
-              <th>Q. attuale</th>
-              <th>Q. iniziale</th>
-              <th>Calcolo grezzo</th>
-              <th>Rimborso</th>
-              <th>Match</th>
-            </tr>
-            </thead>
-            <tbody>
+  <tr>
+    <th class="col-mobile-hide" style="width:44px">
+      <input class="form-check-input" type="checkbox" id="checkAll" title="Seleziona tutti">
+    </th>
+    <th style="min-width:180px">Calciatore</th>
+    <th style="min-width:70px">Ruolo</th>
+    <th class="col-mobile-hide">Squadra</th>
+    <th class="col-mobile-hide">Acquisto</th>
+    <th class="col-mobile-hide">Q. attuale</th>
+    <th class="col-mobile-hide">Q. iniziale</th>
+    <th class="col-mobile-hide">Calcolo grezzo</th>
+    <th>Rimborso</th>
+    <th class="col-mobile-hide">Match</th>
+  </tr>
+</thead>
+
+ <tbody>
 <?php $tot = 0; foreach ($results as $i => $r): $tot += (int)($r['rimborso'] ?? 0); ?>
   <?php
     $canSelect    = $r['rimborso'] !== null;
@@ -502,31 +664,52 @@ body{background:var(--brand-dark); color:#e8eef2}
     }
   ?>
   <tr class="<?= $r['match']==='OK' ? '' : 'table-warning' ?>">
-    <td>
+    <td class="col-mobile-hide">
       <input class="row-check form-check-input" type="checkbox"
              <?= $canSelect ? '' : 'disabled' ?>
              data-rimborso="<?= htmlspecialchars((string)$rim) ?>">
     </td>
-    <td><?= htmlspecialchars($r['player']) ?></td>
+
+    <?php $campId = fc_guess_camp_id_from_row($r); ?>
+    <td class="player-cell">
+  <a href="#"
+     class="player-open"              
+     data-open="player"               
+     data-id="<?= htmlspecialchars((string)$campId) ?>"
+     data-team="<?= htmlspecialchars($selectedTeam) ?>"     
+     data-player="<?= htmlspecialchars($r['player']) ?>"
+     data-ruolo="<?= htmlspecialchars($r['ruolo']) ?>"
+     data-squadra="<?= htmlspecialchars($r['squadra'] ?: '-') ?>"
+     data-acquisto="<?= htmlspecialchars((string)$r['acquisto']) ?>"
+     data-qatt="<?= htmlspecialchars((string)($r['q_att'] ?? '')) ?>"
+     data-qini="<?= htmlspecialchars((string)($r['q_ini'] ?? '')) ?>"
+     data-calc="<?= htmlspecialchars((string)($r['calc'] ?? '')) ?>"
+     data-rimborso="<?= htmlspecialchars((string)($r['rimborso'] ?? '')) ?>"
+     data-match="<?= htmlspecialchars($r['match']) ?>">
+    <?= campioncino_img_auto($r['player'], $campId) ?>
+    <span class="player-name"><?= htmlspecialchars($r['player']) ?></span>
+  </a>
+    </td>
+
     <td>
       <?php if (!empty($r['ruolo'])): ?>
         <span class="badge text-dark" style="background:var(--brand-primary)"><?= htmlspecialchars($r['ruolo']) ?></span>
       <?php else: ?><span class="text-muted">—</span><?php endif; ?>
     </td>
-    <td><?= htmlspecialchars($r['squadra'] ?: '-') ?></td>
-    <td><?= number_format((float)$r['acquisto'], 0, ',', '.') ?></td>
-    <td><?= $r['q_att']!==null ? number_format((float)$r['q_att'], 0, ',', '.') : '-' ?></td>
-    <td><?= $r['q_ini']!==null ? number_format((float)$r['q_ini'], 0, ',', '.') : '-' ?></td>
-    <td><?= $r['calc']!==null ? number_format((float)$r['calc'], 2, ',', '.') : '-' ?></td>
 
-    <!-- Rimborso colorato -->
+    <td class="col-mobile-hide"><?= htmlspecialchars($r['squadra'] ?: '-') ?></td>
+    <td class="col-mobile-hide"><?= number_format((float)$r['acquisto'], 0, ',', '.') ?></td>
+    <td class="col-mobile-hide"><?= $r['q_att']!==null ? number_format((float)$r['q_att'], 0, ',', '.') : '-' ?></td>
+    <td class="col-mobile-hide"><?= $r['q_ini']!==null ? number_format((float)$r['q_ini'], 0, ',', '.') : '-' ?></td>
+    <td class="col-mobile-hide"><?= $r['calc']!==null ? number_format((float)$r['calc'], 2, ',', '.') : '-' ?></td>
+
     <td>
       <strong class="<?= $rimClass ?>">
         <?= $rimborsoVal!==null ? number_format((int)$rimborsoVal, 0, ',', '.') : '-' ?>
       </strong>
     </td>
 
-    <td>
+    <td class="col-mobile-hide">
       <?php if ($r['match']==='OK'): ?>
         <span class="badge text-bg-success">OK</span>
       <?php else: ?>
@@ -536,6 +719,7 @@ body{background:var(--brand-dark); color:#e8eef2}
   </tr>
 <?php endforeach; ?>
 </tbody>
+
 
             <tfoot class="table-secondary text-dark">
               <tr>
@@ -603,6 +787,114 @@ body{background:var(--brand-dark); color:#e8eef2}
     btnNone.addEventListener('click', (e)=>{ e.preventDefault(); checks.forEach(ch=>{ ch.checked=false; }); if(checkAll) checkAll.checked=false; recalc(); });
   }
   recalc();
+})();
+</script>
+<!-- Player Modal -->
+<div class="modal fade" id="playerModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content bg-dark text-light">
+      <div class="modal-header">
+        <h5 class="modal-title" id="playerModalLabel">
+  <?= htmlspecialchars(mb_strtoupper($selectedTeam ?: 'DETTAGLIO GIOCATORE','UTF-8')) ?>
+</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Chiudi"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex align-items-center gap-3 mb-3">
+          <img id="playerModalImg" class="rounded-3" style="width:140px;height:140px;object-fit:contain" alt="">
+          <div>
+            <div class="h5 mb-1" id="playerModalName"></div>
+            <span class="badge text-dark" style="background:var(--brand-primary)" id="playerModalRole"></span>
+          </div>
+        </div>
+        <div class="table-responsive px-0">
+  <table id="tbl" class="table table-dark table-striped table-hover align-middle mb-0 w-100">
+            <tbody>
+              <tr><th>Squadra</th><td id="pm-squadra"></td></tr>
+              <tr><th>Acquisto</th><td id="pm-acquisto"></td></tr>
+              <tr><th>Q. attuale</th><td id="pm-qa"></td></tr>
+              <tr><th>Q. iniziale</th><td id="pm-qi"></td></tr>
+              <tr><th>Calcolo grezzo</th><td id="pm-calc"></td></tr>
+              <tr><th>Rimborso</th><td id="pm-rimborso"></td></tr>
+              <tr><th>Match</th><td id="pm-match"></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  const SEASON = '<?= CAMPIONCINO_PATH_SEASON ?>';
+  const fmt = new Intl.NumberFormat('it-IT');
+  let modalEl=null, bsModal=null;
+
+  document.addEventListener('click', function(e){
+    const a = e.target.closest('[data-open="player"], .player-open, .js-player-open');
+    if (!a) return;
+    e.preventDefault();
+
+    if (!bsModal){
+      modalEl = document.getElementById('playerModal');
+      if (!modalEl) return;
+      bsModal = new bootstrap.Modal(modalEl);
+    }
+
+    const team = a.dataset.team || '';           // 👈 fanta-squadra
+    const name = a.dataset.player || '';
+    const role = a.dataset.ruolo || '';
+    const squadra = a.dataset.squadra || '—';
+    const acquistoRaw = parseFloat(a.dataset.acquisto || 'NaN');
+    const qaRaw = parseFloat(a.dataset.qatt || 'NaN');
+    const qiRaw = parseFloat(a.dataset.qini || 'NaN');
+    const calcRaw = parseFloat(a.dataset.calc || 'NaN');
+    const rimborsoRaw = parseFloat(a.dataset.rimborso || 'NaN');
+
+    // Titolo = NOME FANTA-SQUADRA (non il giocatore)
+    document.getElementById('playerModalLabel').textContent = team || 'Dettaglio giocatore';
+
+    // Immagine
+    const id = a.dataset.id || '';
+    const imgEl = document.getElementById('playerModalImg');
+    if (id) {
+      const card = `https://content.fantacalcio.it/web/campioncini/${SEASON}/card/${id}.png?v=342`;
+      const small = `https://content.fantacalcio.it/web/campioncini/${SEASON}/small/${id}.png?v=342`;
+      imgEl.onerror = ()=>{ imgEl.onerror=null; imgEl.src = small; };
+      imgEl.src = card; imgEl.alt = name;
+    } else {
+      const img = a.querySelector('img');
+      imgEl.onerror = null; imgEl.src = img ? img.src : ''; imgEl.alt = name;
+    }
+
+    // Dati base
+    document.getElementById('playerModalName').textContent = name || '—';
+    document.getElementById('playerModalRole').textContent = role || '—';
+    document.getElementById('pm-squadra').textContent = squadra;
+    document.getElementById('pm-acquisto').textContent = isNaN(acquistoRaw) ? '—' : fmt.format(acquistoRaw);
+    document.getElementById('pm-qa').textContent = isNaN(qaRaw) ? '—' : fmt.format(qaRaw);
+    document.getElementById('pm-qi').textContent = isNaN(qiRaw) ? '—' : fmt.format(qiRaw);
+    document.getElementById('pm-calc').textContent = isNaN(calcRaw) ? '—' : fmt.format(calcRaw);
+
+    // Rimborso con colori come nel PHP originale
+    const rimCell = document.getElementById('pm-rimborso');
+    rimCell.classList.remove('text-success','text-danger','text-white','text-muted','num');
+    if (isNaN(rimborsoRaw)) {
+      rimCell.textContent = '—';
+      rimCell.classList.add('text-muted','num');
+    } else {
+      rimCell.textContent = fmt.format(rimborsoRaw);
+      let cls = 'text-white';
+      if (!isNaN(acquistoRaw)) {
+        if (rimborsoRaw < acquistoRaw) cls = 'text-danger';
+        else if (rimborsoRaw > acquistoRaw) cls = 'text-success';
+      }
+      rimCell.classList.add(cls,'num');
+    }
+
+    document.getElementById('pm-match').textContent = a.dataset.match || '';
+    bsModal.show();
+  });
 })();
 </script>
 </body>
