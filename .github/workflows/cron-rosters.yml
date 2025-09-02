@@ -1,41 +1,41 @@
-name: Cron rosters (every 30 min)
+name: Update Negher rosters (every 30 min)
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"  # ogni 30 minuti (UTC)
+    - cron: "*/30 * * * *"   # ogni 30 minuti (UTC)
+  workflow_dispatch:
 
-permissions:
-  contents: read
+concurrency:
+  group: cron-rosters
+  cancel-in-progress: false
 
 jobs:
-  run:
+  fetch_upload:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install deps
-        run: |
-          npm ci
-          npx playwright install --with-deps chromium
+      - run: npm i
+      - run: npx playwright install --with-deps chromium
 
-      - name: Restore auth.json from secret
-        run: |
-          echo "${{ secrets.AUTH_JSON_B64 }}" | base64 -d > auth.json
-          # check JSON valido
-          node -e "JSON.parse(require('fs').readFileSync('auth.json','utf8'))"
-
-      - name: Run cron script (download + upload)
+      - name: Fetch auth.json from site (stesso metodo del rosters.yml)
         env:
-          LEAGUE_SLUG: negherleague              # cambia se serve
-          UPLOAD_URL: ${{ secrets.UPLOAD_URL }}
           UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
-        run: node scripts/cron_rosters.mjs
+        run: |
+          set -e
+          curl -fsSL -H "Authorization: Bearer $UPLOAD_TOKEN" \
+            "https://www.echelonitaliaweb.it/svincoli/get_auth.php" -o auth.json
+          test -s auth.json && head -c 1 auth.json >/dev/null
+
+      - name: Download XLSX and upload to Aruba
+        env:
+          LEAGUE_SLUG:  ${{ secrets.LEAGUE_SLUG }}
+          UPLOAD_URL:   ${{ secrets.UPLOAD_URL }}
+          UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
+        run: node scripts/download_with_state.mjs
