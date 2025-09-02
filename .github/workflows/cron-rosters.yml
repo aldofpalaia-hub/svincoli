@@ -1,0 +1,41 @@
+name: Cron rosters (every 30 min)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"  # ogni 30 minuti (UTC)
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Restore auth.json from secret
+        run: |
+          echo "${{ secrets.AUTH_JSON_B64 }}" | base64 -d > auth.json
+          # check JSON valido
+          node -e "JSON.parse(require('fs').readFileSync('auth.json','utf8'))"
+
+      - name: Run cron script (download + upload)
+        env:
+          LEAGUE_SLUG: negherleague              # cambia se serve
+          UPLOAD_URL: ${{ secrets.UPLOAD_URL }}
+          UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
+        run: node scripts/cron_rosters.mjs
