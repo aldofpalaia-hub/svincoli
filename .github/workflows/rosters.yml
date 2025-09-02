@@ -1,0 +1,34 @@
+name: Update Negher rosters
+
+on:
+  schedule:
+    - cron: "0 4 * * *"   # 06:00 in Italia quando c'è l'ora legale
+  workflow_dispatch:
+
+jobs:
+  fetch_upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm i
+      - run: npx playwright install --with-deps chromium
+
+      - name: Fetch auth.json from site
+        run: |
+          curl -fsSL -H "Authorization: Bearer $UPLOAD_TOKEN" \
+            "https://www.echelonitaliaweb.it/svincoli/get_auth.php" -o auth.json
+          test -s auth.json && head -c 1 auth.json >/dev/null
+        env:
+          UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
+
+      - name: Download XLSX and upload to Aruba
+        run: node scripts/download_with_state.mjs
+        env:
+          LEAGUE_SLUG:  ${{ secrets.LEAGUE_SLUG }}
+          UPLOAD_URL:   ${{ secrets.UPLOAD_URL }}
+          UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
