@@ -1,8 +1,3 @@
-// scripts/download_leghe_rosters_ci.mjs
-// CI headless: apre /login, accetta il CMP, fa login con i secrets,
-// va su /negherleague/rose, clicca "XLSX", rinomina in "negher rosters.xlsx",
-// e invia il file via HTTP a UPLOAD_URL (con UPLOAD_TOKEN).
-
 import 'dotenv/config';
 import fs from 'fs/promises';
 import path from 'path';
@@ -10,255 +5,194 @@ import { chromium } from 'playwright';
 
 const EMAIL        = process.env.LEGHE_EMAIL || '';
 const PASSWORD     = process.env.LEGHE_PASSWORD || '';
-const UPLOAD_URL   = process.env.UPLOAD_URL || '';
+const LEAGUE_SLUG  = process.env.LEAGUE_SLUG  || 'negherleague';
+const UPLOAD_URL   = process.env.UPLOAD_URL   || '';
 const UPLOAD_TOKEN = process.env.UPLOAD_TOKEN || '';
+const HEADFUL      = !!process.env.HEADFUL;
 
-const LOGIN_URL = 'https://leghe.fantacalcio.it/login';
-const HOME_URL  = 'https://leghe.fantacalcio.it/negherleague';
-const ROSE_URL  = 'https://leghe.fantacalcio.it/negherleague/rose';
-
-const CACHE_DIR = path.resolve('cache');
-const DEBUG_DIR = path.resolve('debug');
-const OUT_CACHE = path.join(CACHE_DIR, 'rose_leghe.xlsx');
-const OUT_FINAL = path.resolve('negher rosters.xlsx');
-
-const NAV_TIMEOUT = 120_000;
-const log = (...a) => console.log(new Date().toISOString(), '-', ...a);
-
-async function ensure(dir) { await fs.mkdir(dir, { recursive: true }); }
-async function ensureFor(file) { await fs.mkdir(path.dirname(file), { recursive: true }); }
-
-async function saveDebug(page, name = 'last') {
-  try {
-    await ensure(DEBUG_DIR);
-    await page.screenshot({ path: path.join(DEBUG_DIR, `${name}.png`), fullPage: true });
-    await fs.writeFile(path.join(DEBUG_DIR, `${name}.html`), await page.content(), 'utf8');
-  } catch {}
+if (!EMAIL || !PASSWORD || !UPLOAD_URL || !UPLOAD_TOKEN) {
+  console.error('ENV mancanti: LEGHE_EMAIL, LEGHE_PASSWORD, UPLOAD_URL, UPLOAD_TOKEN');
+  process.exit(2);
 }
 
-async function safeGoto(page, url) {
-  try { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }); }
-  catch (e) { log('goto warn:', e?.message || e); }
-  await page.waitForTimeout(500);
-}
+const LOGIN_URLS = [
+  'https://leghe.fantacalcio.it/login',
+  'https://leghe.fantacalcio.it/login/gestione-lega/info-lega',
+  'https://www.fantacalcio.it/login',
+];
+const ROSE_URL  = `https://leghe.fantacalcio.it/${LEAGUE_SLUG}/rose`;
 
-/* ---------------- CMP/COOKIE ---------------- */
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-async function acceptCookiesOne(ctx) {
-  const sels = [
-    'button[mode="accept-all"]',                // Pubtech webcomponent
-    '[data-pt-variant="acceptAll"] button',
-    'button:has-text("Accept All")',
-    'button:has-text("Accetta")',
-    'button:has-text("Ho capito")',
-    'button:has-text("OK")',
-    'button:has-text("Chiudi")'
-  ];
-  for (const s of sels) {
-    const btn = ctx.locator(s).first();
+async function acceptCookiesAggressive(scope) {
+  // OneTrust classico
+  const btn = scope.locator('#onetrust-accept-btn-handler, button#onetrust-accept-btn-handler');
+  if (await btn.count()) {
+    try { await btn.first().click({ timeout: 2000 }); } catch {}
+    // se non clicca, forza via JS
     try {
-      if (await btn.count() && await btn.isVisible()) {
-        await btn.click({ timeout: 1500 });
-        return true;
-      }
+      await scope.evaluate(() => {
+        const b = document.querySelector('#onetrust-accept-btn-handler');
+        if (b) b.click();
+        const ban = document.getElementById('onetrust-banner-sdk');
+        if (ban) ban.style.display = 'none';
+      });
     } catch {}
+  }
+  // fallback generico
+  const alt = scope.locator('button:has-text("Accetta"), button:has-text("Accetto"), button:has-text("Accept")');
+  if (await alt.count()) { try { await alt.first().click({ timeout: 1500 }); } catch {} }
+}
+
+async function clickOpenLogin(scope) {
+  const candidates = [
+    'button:has-text("Login")','button:has-text("Accedi")',
+    'a:has-text("Login")','a:has-text("Accedi")'
+  ];
+  for (const sel of candidates) {
+    const el = scope.locator(sel);
+    if (await el.count()) { try { await el.first().click({ timeout: 1500 }); return true; } catch {} }
   }
   return false;
 }
 
-async function acceptCookies(page) {
-  // prova ad aprire esplicitamente la UI del CMP
-  await page.evaluate(() => { try { window.__tcfapi && window.__tcfapi('displayConsentUi', 2, ()=>{}); } catch(e){} });
-  await page.waitForTimeout(900);
-
-  let did = await acceptCookiesOne(page);
-  for (const f of page.frames()) {
-    try { did = (await acceptCookiesOne(f)) || did; } catch {}
-  }
-
-  // ultimo tentativo nel DOM principale (shadowless)
-  await page.evaluate(() => {
-    try {
-      const root = document.querySelector('#pubtech-cmp');
-      const el = root && (root.querySelector('button[mode="accept-all"]') ||
-                          root.querySelector('[data-pt-variant="acceptAll"] button'));
-      el && el.click();
-    } catch {}
-  });
-
-  if (did) await page.waitForTimeout(400);
-}
-
-/* ---------------- LOGIN ---------------- */
-
-async function forceLogin(page) {
-  if (!EMAIL || !PASSWORD) throw new Error('Mancano LEGHE_EMAIL/LEGHE_PASSWORD negli env/secrets.');
-  await safeGoto(page, LOGIN_URL);
-  await acceptCookies(page);
-
-  // form dentro la pagina o in iframe
-  let ctx = page;
-  if (!(await page.locator('input[name="password"]').count())) {
-    for (const f of page.frames()) {
-      if (await f.locator('input[name="password"]').count()) { ctx = f; break; }
+async function fillLoginInFrame(fr, user, pass) {
+  const userSels = [
+    'input[name="username"]','input#username','input[name="login"]',
+    'input[name="email"]','input#email',
+    'input[placeholder*="Nome Utente" i]','input[placeholder*="Username" i]','input[placeholder*="email" i]',
+    'input[type="email"]','input[type="text"]'
+  ];
+  const passSels = [
+    'input[name="password"]','input#password','input[type="password"]',
+    'input[placeholder*="password" i]'
+  ];
+  for (const uSel of userSels) {
+    const u = fr.locator(uSel).first();
+    if (await u.count()) {
+      await u.scrollIntoViewIfNeeded().catch(()=>{});
+      await u.waitFor({ state: 'visible', timeout: 8000 }).catch(()=>{});
+      try { await u.fill(user, { timeout: 8000 }); } catch {}
+      for (const pSel of passSels) {
+        const p = fr.locator(pSel).first();
+        if (await p.count()) {
+          await p.scrollIntoViewIfNeeded().catch(()=>{});
+          await p.waitFor({ state: 'visible', timeout: 8000 }).catch(()=>{});
+          try { await p.fill(pass, { timeout: 8000 }); } catch {}
+          const submitted = await (async () => {
+            const submit = fr.locator('button[type="submit"], input[type="submit"], button:has-text("Login"), button:has-text("Accedi")').first();
+            if (await submit.count()) { try { await submit.click({ timeout: 2000 }); return true; } catch {} }
+            try { await p.press('Enter'); return true; } catch {}
+            return false;
+          })();
+          if (submitted) return true;
+        }
+      }
     }
   }
+  return false;
+}
 
-  const user = ctx.locator('input[name="username"], input[name="email"]').first();
-  const pass = ctx.locator('input[name="password"]').first();
-  if (!(await user.count()) || !(await pass.count())) {
-    log('Form login non trovato (forse già loggato).');
-    return;
+async function doLogin(page) {
+  for (const url of LOGIN_URLS) {
+    try {
+      console.log('> Apro login:', url);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await acceptCookiesAggressive(page);
+      await clickOpenLogin(page);
+
+      // prova in pagina
+      let ok = await fillLoginInFrame(page, EMAIL, PASSWORD);
+      // prova negli iframe eventuali
+      if (!ok) {
+        for (const fr of page.frames()) {
+          try {
+            await acceptCookiesAggressive(fr);
+            await clickOpenLogin(fr);
+            ok = await fillLoginInFrame(fr, EMAIL, PASSWORD);
+            if (ok) break;
+          } catch {}
+        }
+      }
+      if (ok) {
+        await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(()=>{});
+        return true;
+      }
+    } catch (e) {
+      console.warn('Tentativo login fallito su', url, '-', e?.message || e);
+    }
+  }
+  return false;
+}
+
+async function main() {
+  const browser = await chromium.launch({
+    headless: !HEADFUL,
+    args: ['--disable-blink-features=AutomationControlled'],
+  });
+  const ctx = await browser.newContext({
+    userAgent: 'NegherLeague CI/1.0 (+playwright chromium)',
+    acceptDownloads: true,
+  });
+  await ctx.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  });
+  const page = await ctx.newPage();
+
+  const logged = await doLogin(page);
+  if (!logged) {
+    await page.screenshot({ path: 'debug_login.png', fullPage: true }).catch(()=>{});
+    console.error('Impossibile compilare/inviare il form di login. Vedi debug_login.png');
+    process.exit(10);
   }
 
-  await user.fill(EMAIL, { timeout: 15000 });
-  await pass.fill(PASSWORD, { timeout: 15000 });
+  console.log('> Vai a rose:', ROSE_URL);
+  await page.goto(ROSE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
+  await acceptCookiesAggressive(page);
 
-  const submit = ctx.locator('#buttonLogin, button[type="submit"], input[type="submit"], button:has-text("Accedi"), button:has-text("Login")').first();
-  await Promise.all([
-    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }).catch(()=>{}),
-    submit.click().catch(() => pass.press('Enter'))
+  console.log('> Download XLSX…');
+  const xlsxLocator = page.locator('a:has-text("XLSX"), button:has-text("XLSX"), a[href*="Excel"], a[href$=".xlsx"], a[href*="/xlsx"]');
+  await xlsxLocator.first().waitFor({ timeout: 25000 });
+
+  const [download] = await Promise.all([
+    page.waitForEvent('download', { timeout: 25000 }),
+    xlsxLocator.first().click()
   ]);
 
-  await acceptCookies(page);
-}
+  const outName = 'negher rosters.xlsx';
+  const outPath = path.resolve(outName);
+  await download.saveAs(outPath);
 
-/* ---------------- VERIFICA LOGIN ---------------- */
-
-async function ensureLogged(page) {
-  // il sito mette "guest" sul body quando non autenticato
-  const guest = await page.evaluate(() => document.body.classList.contains('guest'));
-  if (guest) {
-    await saveDebug(page, 'still_guest');
-    throw new Error('Non autenticato (body.guest presente).');
-  }
-}
-
-/* ---------------- DOWNLOAD XLSX ---------------- */
-
-async function openDownloadMenus(page) {
-  const toggles = [
-    'button:has-text("Scarica")', 'a:has-text("Scarica")',
-    'button:has-text("Esporta")', 'a:has-text("Esporta")',
-    '.dropdown-toggle'
-  ];
-  for (const sel of toggles) {
-    const el = page.locator(sel).first();
-    try { if (await el.count() && await el.isVisible()) { await el.click({ timeout: 1000 }); await page.waitForTimeout(200); } } catch {}
-  }
-}
-
-async function downloadXlsx(page, outPath) {
-  await openDownloadMenus(page);
-
-  const sels = [
-    'a:has-text("XLSX")', 'button:has-text("XLSX")',
-    'a:has-text("Scarica XLSX")', 'button:has-text("Scarica XLSX")',
-    'a:has-text("Excel")', 'button:has-text("Excel")',
-    'a[href$=".xlsx"]', 'a[href*=".xlsx"]', 'a[download$=".xlsx"]', 'a[download*=".xlsx"]'
-  ];
-
-  for (let pass = 0; pass < 2; pass++) {
-    if (pass === 1) { await page.keyboard.press('End'); await page.waitForTimeout(600); await openDownloadMenus(page); }
-    for (const sel of sels) {
-      const cand = page.locator(sel).first();
-      try {
-        if (await cand.count()) {
-          await cand.waitFor({ state: 'visible', timeout: 5000 });
-          if (await cand.isVisible()) {
-            const [dl] = await Promise.all([
-              page.waitForEvent('download', { timeout: NAV_TIMEOUT }),
-              cand.click()
-            ]);
-            await ensureFor(outPath);
-            try { await fs.unlink(outPath); } catch {}
-            await dl.saveAs(outPath);
-            log(`Scaricato (XLSX): ${outPath}`);
-            return;
-          }
-        }
-      } catch {}
-    }
+  const stat = await fs.stat(outPath);
+  if (stat.size < 10000) {
+    await page.screenshot({ path: 'debug_after_download.png', fullPage: true }).catch(()=>{});
+    throw new Error('XLSX troppo piccolo: possibile errore di export/login.');
   }
 
-  await saveDebug(page, 'no_xlsx');
-  throw new Error('Bottone/Link XLSX non trovato sulla pagina.');
-}
+  console.log('> Upload ad Aruba…');
+  const buf = await fs.readFile(outPath);
+  const fd = new FormData();
+  const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  fd.append('file', blob, outName);
 
-/* ---------------- UPLOAD VIA HTTP ---------------- */
-
-async function httpUpload(filePath) {
-  if (!UPLOAD_URL || !UPLOAD_TOKEN) {
-    log('HTTP upload disabilitato: manca UPLOAD_URL/UPLOAD_TOKEN.');
-    return;
-  }
-  const buf = await fs.readFile(filePath);
-  const form = new FormData();
-  form.append('token', UPLOAD_TOKEN);
-  form.append('file', new Blob([buf], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-  }), 'negher rosters.xlsx');
-
-  const res = await fetch(UPLOAD_URL, { method: 'POST', body: form });
-  const txt = await res.text();
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${txt.slice(0,200)}`);
-  log(`HTTP upload OK: ${txt.slice(0,200)}...`);
-}
-
-/* ---------------- MAIN ---------------- */
-
-(async () => {
-  await ensure(CACHE_DIR);
-  await ensure(DEBUG_DIR);
-
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage']
+  const res = await fetch(UPLOAD_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${UPLOAD_TOKEN}` },
+    body: fd
   });
 
-  const ctx = await browser.newContext({
-    acceptDownloads: true,
-    userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) PlaywrightCI Safari/537.36'
-  });
-
-  // filtra roba pesante/tracker
-  await ctx.route('**/*', route => {
-    const u = route.request().url();
-    if (/doubleclick|googletagmanager|google-analytics|facebook|hotjar|optimizely|segment|datadog/i.test(u)) return route.abort();
-    if (/\.(mp4|webm|m3u8)$/i.test(u)) return route.abort();
-    return route.continue();
-  });
-
-  const page = await ctx.newPage();
-  page.setDefaultNavigationTimeout(NAV_TIMEOUT);
-
-  try {
-    // 1) Login
-    await forceLogin(page);
-
-    // 2) Vai in lega e verifica sessione
-    await safeGoto(page, HOME_URL);
-    await acceptCookies(page);
-    await ensureLogged(page);
-
-    // 3) Vai su ROSE e scarica
-    await safeGoto(page, ROSE_URL);
-    await acceptCookies(page);
-    await saveDebug(page, 'rose');
-
-    await downloadXlsx(page, OUT_CACHE);
-
-    try { await fs.unlink(OUT_FINAL); } catch {}
-    await fs.rename(OUT_CACHE, OUT_FINAL);
-    log(`OK: rinominato in ${OUT_FINAL}`);
-
-    // 4) Upload
-    await httpUpload(OUT_FINAL);
-  } catch (e) {
-    await saveDebug(page, 'error');
-    console.error('Errore downloader:', e?.message || e);
-    process.exit(2);
-  } finally {
-    await browser.close();
+  const text = await res.text();
+  if (!res.ok || !/^OK /.test(text)) {
+    console.error('Upload fallito. Status:', res.status, 'Body:', text);
+    process.exit(3);
   }
-})();
+  console.log(text);
+
+  await browser.close();
+  console.log('> Fatto!');
+}
+
+main().catch(async (err) => {
+  console.error('ERRORE downloader:', err?.message || err);
+  process.exit(1);
+});
