@@ -1,48 +1,86 @@
-name: Update negher rosters (Playwright → HTTP upload)
+name: Update rosters (every 30 min)
 
 on:
-  workflow_dispatch: {}
-  # schedule:
-  #   - cron: '10 2 * * *'   # 03:10 ora italiana (circa), regolata su UTC
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"  # ogni 30 minuti (UTC)
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-rosters
+  cancel-in-progress: false
 
 jobs:
-  run:
+  update:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: 20
 
       - name: Install deps
         run: |
-          npm ci || npm i
-          npx playwright install --with-deps chromium
+          npm ci
+          npx playwright install --with-deps
 
-      - name: Check required secrets
+      - name: Fetch cookies from Aruba (get_auth.php)
         run: |
-          [ -n "${{ secrets.LEGHE_EMAIL }}" ]    || { echo "::error::Missing LEGHE_EMAIL"; exit 1; }
-          [ -n "${{ secrets.LEGHE_PASSWORD }}" ] || { echo "::error::Missing LEGHE_PASSWORD"; exit 1; }
-          [ -n "${{ secrets.UPLOAD_URL }}" ]     || { echo "::error::Missing UPLOAD_URL"; exit 1; }
-          [ -n "${{ secrets.UPLOAD_TOKEN }}" ]   || { echo "::error::Missing UPLOAD_TOKEN"; exit 1; }
+          curl -fsS "https://www.echelonitaliaweb.it/svincoli/get_auth.php" \
+            -H "Authorization: Bearer ${{ secrets.AUTH_TOKEN }}" \
+            -o auth.json
+          test -s auth.json
 
-      - name: Download XLSX and upload to site (headless)
+      - name: Download XLSX with Playwright
         env:
-          LEGHE_EMAIL:    ${{ secrets.LEGHE_EMAIL }}
-          LEGHE_PASSWORD: ${{ secrets.LEGHE_PASSWORD }}
-          UPLOAD_URL:     ${{ secrets.UPLOAD_URL }}
-          UPLOAD_TOKEN:   ${{ secrets.UPLOAD_TOKEN }}
-          DEBUG: pw:api
-        run: node scripts/download_leghe_rosters_ci.mjs
+          AUTH_JSON: ${{ github.workspace }}/auth.json
+          # Se il tuo script legge altre variabili, definiscile qui:
+          # LEGHE_ROSE_URL: ${{ secrets.LEGHE_ROSE_URL }}  # es. https://leghe.fantacalcio.it/<lega>/rose
+        run: node scripts/download_with_state.mjs
 
-      - name: Upload debug artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Check XLSX exists
+        run: |
+          test -s "negher rosters.xlsx"
+          sha256sum "negher rosters.xlsx" | awk '{print $1}' > sha.txt
+
+      # --- OPZIONE A: upload via HTTP al tuo endpoint (consigliata) ---
+      - name: Upload to Aruba via HTTP (upload_rosters.php)
+        if: ${{ vars.UPLOAD_METHOD != 'FTP' }}
+        run: |
+          SHA="$(cat sha.txt)"
+          curl -fsS -X POST "https://www.echelonitaliaweb.it/svincoli/upload_rosters.php" \
+            -H "Authorization: Bearer ${{ secrets.UPLOAD_TOKEN }}" \
+            -F "roster=@negher rosters.xlsx" \
+            -F "sha256=${SHA}"
+
+      # --- OPZIONE B: in alternativa, FTP Deploy (se preferisci) ---
+      - name: Prepare dist (only XLSX + status/history)
+        if: ${{ vars.UPLOAD_METHOD == 'FTP' }}
+        run: |
+          rm -rf dist
+          mkdir -p dist/history
+          cp "negher rosters.xlsx" dist/
+          [ -f status.json ] && cp status.json dist/ || true
+          [ -d history ] && cp -r history/. dist/history/ || true
+
+      - name: FTP Deploy to Aruba
+        if: ${{ vars.UPLOAD_METHOD == 'FTP' }}
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
-          name: debug-artifacts
-          path: |
-            cache/**
-            debug/**
-            negher rosters.xlsx
-          if-no-files-found: ignore
+          server: ${{ secrets.ARUBA_FTP_HOST }}
+          username: ${{ secrets.ARUBA_FTP_USER }}
+          password: ${{ secrets.ARUBA_FTP_PASS }}
+          server-dir: ${{ secrets.ARUBA_SERVER_DIR }} # es. /svincoli/
+          local-dir: dist
+          dangerous-clean-slate: false
+          exclude: |
+            **/.git*
+            **/.github/**
+            **/node_modules/**
