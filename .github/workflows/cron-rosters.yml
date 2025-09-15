@@ -1,41 +1,86 @@
-name: Update Negher rosters (every 30 min)
+name: Update rosters (every 30 min)
 
 on:
-  schedule:
-    - cron: "*/30 * * * *"   # ogni 30 minuti (UTC)
   workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"  # ogni 30 minuti (UTC)
+
+permissions:
+  contents: read
 
 concurrency:
-  group: cron-rosters
+  group: update-rosters
   cancel-in-progress: false
 
 jobs:
-  fetch_upload:
+  update:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - run: npm i
-      - run: npx playwright install --with-deps chromium
-
-      - name: Fetch auth.json from site (stesso metodo del rosters.yml)
-        env:
-          UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
+      - name: Install deps
         run: |
-          set -e
-          curl -fsSL -H "Authorization: Bearer $UPLOAD_TOKEN" \
-            "https://www.echelonitaliaweb.it/svincoli/get_auth.php" -o auth.json
-          test -s auth.json && head -c 1 auth.json >/dev/null
+          npm ci
+          npx playwright install --with-deps
 
-      - name: Download XLSX and upload to Aruba
+      - name: Fetch cookies from Aruba (get_auth.php)
+        run: |
+          curl -fsS "https://www.echelonitaliaweb.it/svincoli/get_auth.php" \
+            -H "Authorization: Bearer ${{ secrets.AUTH_TOKEN }}" \
+            -o auth.json
+          test -s auth.json
+
+      - name: Download XLSX with Playwright
         env:
-          LEAGUE_SLUG:  ${{ secrets.LEAGUE_SLUG }}
-          UPLOAD_URL:   ${{ secrets.UPLOAD_URL }}
-          UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
+          AUTH_JSON: ${{ github.workspace }}/auth.json
+          # Se il tuo script legge altre variabili, definiscile qui:
+          # LEGHE_ROSE_URL: ${{ secrets.LEGHE_ROSE_URL }}  # es. https://leghe.fantacalcio.it/<lega>/rose
         run: node scripts/download_with_state.mjs
+
+      - name: Check XLSX exists
+        run: |
+          test -s "negher rosters.xlsx"
+          sha256sum "negher rosters.xlsx" | awk '{print $1}' > sha.txt
+
+      # --- OPZIONE A: upload via HTTP al tuo endpoint (consigliata) ---
+      - name: Upload to Aruba via HTTP (upload_rosters.php)
+        if: ${{ vars.UPLOAD_METHOD != 'FTP' }}
+        run: |
+          SHA="$(cat sha.txt)"
+          curl -fsS -X POST "https://www.echelonitaliaweb.it/svincoli/upload_rosters.php" \
+            -H "Authorization: Bearer ${{ secrets.UPLOAD_TOKEN }}" \
+            -F "roster=@negher rosters.xlsx" \
+            -F "sha256=${SHA}"
+
+      # --- OPZIONE B: in alternativa, FTP Deploy (se preferisci) ---
+      - name: Prepare dist (only XLSX + status/history)
+        if: ${{ vars.UPLOAD_METHOD == 'FTP' }}
+        run: |
+          rm -rf dist
+          mkdir -p dist/history
+          cp "negher rosters.xlsx" dist/
+          [ -f status.json ] && cp status.json dist/ || true
+          [ -d history ] && cp -r history/. dist/history/ || true
+
+      - name: FTP Deploy to Aruba
+        if: ${{ vars.UPLOAD_METHOD == 'FTP' }}
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.ARUBA_FTP_HOST }}
+          username: ${{ secrets.ARUBA_FTP_USER }}
+          password: ${{ secrets.ARUBA_FTP_PASS }}
+          server-dir: ${{ secrets.ARUBA_SERVER_DIR }} # es. /svincoli/
+          local-dir: dist
+          dangerous-clean-slate: false
+          exclude: |
+            **/.git*
+            **/.github/**
+            **/node_modules/**
