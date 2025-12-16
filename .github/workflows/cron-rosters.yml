@@ -21,7 +21,7 @@ jobs:
         with:
           node-version: 20
 
-      - run: npm i
+      - run: npm ci --no-audit --no-fund
       - run: npx playwright install --with-deps chromium
 
       - name: Fetch auth.json from site (stesso metodo del rosters.yml)
@@ -29,7 +29,8 @@ jobs:
           UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
         run: |
           set -e
-          curl -fsSL -H "Authorization: Bearer $UPLOAD_TOKEN" \
+          curl --fail --show-error --retry 3 --retry-delay 3 --connect-timeout 15 --max-time 45 \
+            -H "Authorization: Bearer $UPLOAD_TOKEN" \
             "https://www.echelonitaliaweb.it/svincoli/get_auth.php" -o auth.json
           test -s auth.json && head -c 1 auth.json >/dev/null
 
@@ -38,4 +39,6 @@ jobs:
           LEAGUE_SLUG:  ${{ secrets.LEAGUE_SLUG }}
           UPLOAD_URL:   ${{ secrets.UPLOAD_URL }}
           UPLOAD_TOKEN: ${{ secrets.UPLOAD_TOKEN }}
+          LEGHE_EMAIL:  ${{ secrets.LEGHE_EMAIL }}
+          LEGHE_PASSWORD: ${{ secrets.LEGHE_PASSWORD }}
         run: node scripts/download_with_state.mjs
