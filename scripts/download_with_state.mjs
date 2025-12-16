@@ -1,8 +1,10 @@
-import 'dotenv/config';
 import fs from 'fs/promises';
 import path from 'path';
 import { chromium } from 'playwright';
 
+await import('dotenv/config').catch(() => {
+  // in CI la .env non serve; evita crash se dotenv non è installato
+});
 const LEAGUE_SLUG  = process.env.LEAGUE_SLUG || 'negherleague';
 const UPLOAD_URL   = process.env.UPLOAD_URL  || '';
 const UPLOAD_TOKEN = process.env.UPLOAD_TOKEN|| '';
