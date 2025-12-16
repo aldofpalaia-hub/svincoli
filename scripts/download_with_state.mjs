@@ -10,6 +10,11 @@ const UPLOAD_URL   = process.env.UPLOAD_URL  || '';
 const UPLOAD_TOKEN = process.env.UPLOAD_TOKEN|| '';
 const EMAIL        = process.env.LEGHE_EMAIL || '';
 const PASSWORD     = process.env.LEGHE_PASSWORD || '';
+const LOGIN_URLS = [
+  'https://leghe.fantacalcio.it/login',
+  'https://leghe.fantacalcio.it/login/gestione-lega/info-lega',
+  'https://www.fantacalcio.it/login',
+];
 
 const ROSE_URL = `https://leghe.fantacalcio.it/${LEAGUE_SLUG}/rose`;
 const STORAGE  = 'auth.json';
@@ -64,6 +69,79 @@ async function maybeLogin(page) {
   return true;
 }
 
+async function clickOpenLogin(scope) {
+  const candidates = [
+    'button:has-text("Login")','button:has-text("Accedi")',
+    'a:has-text("Login")','a:has-text("Accedi")'
+  ];
+  for (const sel of candidates) {
+    const el = scope.locator(sel);
+    if (await el.count()) { try { await el.first().click({ timeout: 1500 }); return true; } catch {} }
+  }
+  return false;
+}
+
+async function fillLoginInScope(scope) {
+  const userSels = [
+    'input[name="username"]','input#username','input[name="login"]',
+    'input[name="email"]','input#email',
+    'input[placeholder*="Nome Utente" i]','input[placeholder*="Username" i]','input[placeholder*="email" i]',
+    'input[type="email"]','input[type="text"]'
+  ];
+  const passSels = [
+    'input[name="password"]','input#password','input[type="password"]',
+    'input[placeholder*="password" i]'
+  ];
+  for (const uSel of userSels) {
+    const u = scope.locator(uSel).first();
+    if (await u.count()) {
+      try { await u.fill(EMAIL, { timeout: 8000 }); } catch {}
+      for (const pSel of passSels) {
+        const p = scope.locator(pSel).first();
+        if (await p.count()) {
+          try { await p.fill(PASSWORD, { timeout: 8000 }); } catch {}
+          const submit = scope.locator('button[type="submit"], input[type="submit"], button:has-text("Login"), button:has-text("Accedi")').first();
+          try {
+            if (await submit.count()) await submit.click({ timeout: 2000 }); else await p.press('Enter');
+          } catch {}
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+async function fullLogin(page) {
+  if (!EMAIL || !PASSWORD) return false;
+  for (const url of LOGIN_URLS) {
+    try {
+      log('Tentativo login su', url);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+      await acceptCookies(page);
+      await clickOpenLogin(page);
+      let ok = await fillLoginInScope(page);
+      if (!ok) {
+        for (const fr of page.frames()) {
+          try {
+            await acceptCookies(fr);
+            await clickOpenLogin(fr);
+            ok = await fillLoginInScope(fr);
+            if (ok) break;
+          } catch {}
+        }
+      }
+      if (ok) {
+        await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(()=>{});
+        return true;
+      }
+    } catch (e) {
+      log('Login fallito su', url, '-', e?.message || e);
+    }
+  }
+  return false;
+}
+
 async function ensureDownload(page) {
   const selectors = [
     'a:has-text("XLSX")', 'button:has-text("XLSX")',
@@ -114,7 +192,11 @@ async function main() {
     }
     const stillLogin = await page.locator('input[type="password"]').first().count();
     if (stillLogin) {
-      throw new Error('Ancora su pagina di login: controlla LEGHE_EMAIL/LEGHE_PASSWORD o auth.json');
+      log('Ancora su pagina di login, provo flusso completo...');
+      const logged = await fullLogin(page);
+      if (!logged) throw new Error('Login fallito: controlla LEGHE_EMAIL/LEGHE_PASSWORD o auth.json');
+      await page.goto(ROSE_URL, { waitUntil: 'domcontentloaded' });
+      await acceptCookies(page);
     }
 
     log('Cerco bottone XLSX e scarico...');
