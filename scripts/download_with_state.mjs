@@ -65,13 +65,28 @@ async function maybeLogin(page) {
 }
 
 async function ensureDownload(page) {
-  const xlsx = page.locator('a:has-text("XLSX"), button:has-text("XLSX"), a[href$=".xlsx"]');
-  await xlsx.first().waitFor({ timeout: 25000 });
-  const [download] = await Promise.all([
-    page.waitForEvent('download', { timeout: 30000 }),
-    xlsx.first().click()
-  ]);
-  return download;
+  const selectors = [
+    'a:has-text("XLSX")', 'button:has-text("XLSX")',
+    'a:has-text("Excel")', 'button:has-text("Excel")',
+    'a[href$=".xlsx"]', 'a[href*=".xlsx"]', 'a[download*=".xlsx"]',
+    'a[href*="xlsx"]', 'button:has-text("Esporta")', 'button:has-text("Download")',
+  ];
+
+  for (const sel of selectors) {
+    const loc = page.locator(sel).first();
+    if (await loc.count()) {
+      try { await loc.scrollIntoViewIfNeeded(); } catch {}
+      await loc.waitFor({ timeout: 25_000, state: 'visible' });
+      const [download] = await Promise.all([
+        page.waitForEvent('download', { timeout: 30_000 }),
+        loc.click()
+      ]);
+      return download;
+    }
+  }
+
+  await page.screenshot({ path: 'debug_no_xlsx.png', fullPage: true }).catch(()=>{});
+  throw new Error('Bottone/link XLSX non trovato (screenshot: debug_no_xlsx.png)');
 }
 
 async function main() {
@@ -96,6 +111,10 @@ async function main() {
       await maybeLogin(page);
       await page.goto(ROSE_URL, { waitUntil: 'domcontentloaded' });
       await acceptCookies(page);
+    }
+    const stillLogin = await page.locator('input[type="password"]').first().count();
+    if (stillLogin) {
+      throw new Error('Ancora su pagina di login: controlla LEGHE_EMAIL/LEGHE_PASSWORD o auth.json');
     }
 
     log('Cerco bottone XLSX e scarico...');
